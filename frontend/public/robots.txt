@@ -1,0 +1,11 @@
+User-agent: *
+Allow: /
+Disallow: /login
+Disallow: /signup
+Disallow: /forgot-password
+Disallow: /reset-password
+Disallow: /dashboard
+Disallow: /manager
+Disallow: /payment-callback
+
+Sitemap: https://staynex.vercel.app/sitemap.xml

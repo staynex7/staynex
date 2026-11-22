@@ -1,0 +1,20 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="circleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ADE5FF"/>
+      <stop offset="45%" stop-color="#3E86B5"/>
+      <stop offset="100%" stop-color="#0D3A57"/>
+    </linearGradient>
+  </defs>
+
+  <!-- icon circle -->
+  <circle cx="28" cy="28" r="24" fill="url(#circleGrad)"/>
+
+  <!-- house pictogram -->
+  <path d="M28 14 L42 25 L38 25 L38 38 L18 38 L18 25 L14 25 Z" fill="#0B1B29"/>
+  <rect x="25" y="30" width="6" height="8" fill="#ADE5FF"/>
+
+  <!-- magnifying glass -->
+  <circle cx="44" cy="44" r="11" fill="none" stroke="#E8ECEF" stroke-width="4"/>
+  <line x1="52" y1="52" x2="60" y2="60" stroke="#E8ECEF" stroke-width="5" stroke-linecap="round"/>
+</svg>

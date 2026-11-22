@@ -1,0 +1,263 @@
+-- StayNex — PostgreSQL schema
+-- Run with: psql $DATABASE_URL -f schema.sql
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Postgres has no CREATE TYPE IF NOT EXISTS (unlike tables/indexes), so each
+-- enum is wrapped in a DO block that catches "already exists" and moves on —
+-- this is what actually makes migrate.js safe to re-run.
+DO $$ BEGIN
+  CREATE TYPE user_role AS ENUM ('student', 'manager');
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE gender_policy AS ENUM ('male', 'female', 'mixed');
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE bed_status AS ENUM ('available', 'taken', 'reserved_pending', 'maintenance');
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE booking_status AS ENUM ('pending_payment', 'deposit_paid', 'balance_paid', 'forfeited', 'cancelled');
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
+
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  role user_role NOT NULL,
+  name TEXT NOT NULL,
+  email TEXT UNIQUE NOT NULL,
+  phone TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  gender TEXT CHECK (gender IN ('male', 'female')), -- required for students at signup;
+  -- used to enforce hostel gender_policy and prevent opposite genders sharing a room
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS hostels (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  manager_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  area TEXT NOT NULL,
+  gender_policy gender_policy NOT NULL DEFAULT 'mixed',
+  includes TEXT[] DEFAULT '{}',
+  verified BOOLEAN DEFAULT false,
+  deposit_pct NUMERIC(4,3) NOT NULL DEFAULT 0.35, -- e.g. 0.35 = 35%
+  paystack_subaccount_code TEXT, -- set once manager completes Paystack onboarding
+  photos TEXT[] DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Coordinates each of KNUST's fixed access points geocode to. Geocoded once
+-- per landmark, ever — coordinates for a real place don't change, so there's
+-- no reason to hit the geocoding API again once a landmark is cached here.
+CREATE TABLE IF NOT EXISTS landmarks (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name TEXT UNIQUE NOT NULL,
+  search_query TEXT NOT NULL,
+  latitude NUMERIC(10,7),
+  longitude NUMERIC(10,7),
+  geocoded_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS rooms (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  hostel_id UUID NOT NULL REFERENCES hostels(id) ON DELETE CASCADE,
+  room_code TEXT NOT NULL, -- e.g. "A1"
+  room_type TEXT NOT NULL, -- Single, 2-in-1, 4-in-1
+  price_per_year NUMERIC(10,2) NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(hostel_id, room_code)
+);
+
+CREATE TABLE IF NOT EXISTS beds (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  room_id UUID NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  bed_index INT NOT NULL, -- 0, 1, 2...
+  status bed_status NOT NULL DEFAULT 'available',
+  hold_expires_at TIMESTAMPTZ, -- used for the 15-minute reservation hold
+  UNIQUE(room_id, bed_index)
+);
+
+-- Room photos/short clips, OR a hostel's own cover photo — exactly one of
+-- room_id/hostel_id is set, never both, never neither. Only a lightweight
+-- URL + Cloudinary reference lives here — actual files are never stored in
+-- Postgres, so this table stays tiny no matter how many photos get uploaded.
+CREATE TABLE IF NOT EXISTS media (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  room_id UUID REFERENCES rooms(id) ON DELETE CASCADE,
+  hostel_id UUID REFERENCES hostels(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  public_id TEXT NOT NULL, -- Cloudinary's reference, needed to delete the file later
+  resource_type TEXT NOT NULL CHECK (resource_type IN ('image', 'video')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS bookings (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  student_id UUID NOT NULL REFERENCES users(id),
+  bed_id UUID NOT NULL REFERENCES beds(id),
+  deposit_amount NUMERIC(10,2) NOT NULL,
+  service_fee NUMERIC(10,2) NOT NULL DEFAULT 50,
+  balance_amount NUMERIC(10,2) NOT NULL,
+  balance_due_date DATE NOT NULL,
+  status booking_status NOT NULL DEFAULT 'pending_payment',
+  paystack_ref TEXT UNIQUE,
+  grace_period_ends_at DATE, -- balance_due_date + 3-5 days
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS waitlist_entries (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  student_id UUID NOT NULL REFERENCES users(id),
+  room_id UUID NOT NULL REFERENCES rooms(id),
+  position INT NOT NULL,
+  notified_at TIMESTAMPTZ,
+  claim_expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS reminders_log (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  booking_id UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  reminder_type TEXT NOT NULL, -- '2_weeks' | '3_days' | 'deadline' | 'grace_warning' | 'forfeited'
+  sent_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_beds_room ON beds(room_id);
+CREATE INDEX IF NOT EXISTS idx_rooms_hostel ON rooms(hostel_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_student ON bookings(student_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_due_date ON bookings(balance_due_date) WHERE status = 'deposit_paid';
+CREATE INDEX IF NOT EXISTS idx_waitlist_room ON waitlist_entries(room_id, position);
+
+-- Room-level amenities (e.g. private bathroom, AC, bunk beds) — separate from
+-- hostels.includes, which covers property-wide amenities (security, gym, etc).
+-- ADD COLUMN IF NOT EXISTS makes this safe to re-run against a database that
+-- already has the rooms table from before this column existed.
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS amenities TEXT[] DEFAULT '{}';
+
+-- Same reasoning: users table already exists on deployed databases, so the
+-- gender column needs its own ALTER rather than relying on CREATE TABLE.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT CHECK (gender IN ('male', 'female'));
+
+-- Tracks WHO placed a 15-minute hold, not just that one exists — needed to
+-- catch a gender clash against someone mid-checkout in the same room, not
+-- only against someone who has already fully paid.
+ALTER TABLE beds ADD COLUMN IF NOT EXISTS held_by UUID REFERENCES users(id);
+
+-- Media used to only attach to rooms; this lets it attach to a hostel
+-- directly too (for a cover photo set at creation, before any room exists).
+ALTER TABLE media ALTER COLUMN room_id DROP NOT NULL;
+ALTER TABLE media ADD COLUMN IF NOT EXISTS hostel_id UUID REFERENCES hostels(id) ON DELETE CASCADE;
+
+-- Postgres has no ADD CONSTRAINT IF NOT EXISTS either — same DO-block fix
+-- as the enum types above.
+DO $$ BEGIN
+  ALTER TABLE media ADD CONSTRAINT media_belongs_to_one_parent
+    CHECK ((room_id IS NOT NULL AND hostel_id IS NULL) OR (room_id IS NULL AND hostel_id IS NOT NULL));
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
+
+-- Manager-set pin location and pre-computed walking distances to KNUST's
+-- fixed access points. landmark_distances is computed ONCE when the manager
+-- sets/updates the pin — never recalculated per page view — which is what
+-- keeps this comfortably inside a free routing API's daily quota regardless
+-- of how many students browse the site.
+ALTER TABLE hostels ADD COLUMN IF NOT EXISTS latitude NUMERIC(10,7);
+ALTER TABLE hostels ADD COLUMN IF NOT EXISTS longitude NUMERIC(10,7);
+ALTER TABLE hostels ADD COLUMN IF NOT EXISTS landmark_distances JSONB DEFAULT '{}';
+
+-- Student profile photo — optional, skippable at signup. Nullable on
+-- purpose; a manager account never sets these.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_public_id TEXT;
+
+-- Free-text note a manager can add for anything a student should know
+-- before booking that doesn't fit a structured field (e.g. "no visitors
+-- after 9pm", "landlord lives on-site", house rules, etc).
+ALTER TABLE hostels ADD COLUMN IF NOT EXISTS additional_info TEXT;
+
+-- ---------------------------------------------------------------------------
+-- Payment ledger. Every Paystack transaction is recorded HERE, server-side,
+-- at initialization time — bound to a specific student and bed (deposit) or
+-- booking (balance), with the exact amount we expect Paystack to report.
+-- verify endpoints and the webhook settle strictly against this row, so a
+-- reference can never be replayed against a different bed/booking, and each
+-- reference can settle exactly once.
+-- ---------------------------------------------------------------------------
+DO $$ BEGIN
+  CREATE TYPE payment_kind AS ENUM ('deposit', 'balance');
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE payment_status AS ENUM ('initialized', 'settled', 'needs_review');
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
+
+CREATE TABLE IF NOT EXISTS payments (
+  reference TEXT PRIMARY KEY,
+  kind payment_kind NOT NULL,
+  student_id UUID NOT NULL REFERENCES users(id),
+  bed_id UUID REFERENCES beds(id),            -- deposit payments
+  booking_id UUID REFERENCES bookings(id),    -- set on settlement (deposit) or at init (balance)
+  principal_amount NUMERIC(10,2) NOT NULL,    -- deposit or balance portion (excludes our fee + Paystack fee)
+  expected_total_pesewas BIGINT NOT NULL,     -- what Paystack must report as paid
+  status payment_status NOT NULL DEFAULT 'initialized',
+  review_reason TEXT,                         -- why a successful payment couldn't be applied (refund needed)
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  settled_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_payments_student ON payments(student_id);
+CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status) WHERE status <> 'settled';
+
+-- One reminder of each type per booking, enforced by the database so two
+-- triggers of the job (cron + external ping) can never double-send.
+DELETE FROM reminders_log a USING reminders_log b
+  WHERE a.booking_id = b.booking_id AND a.reminder_type = b.reminder_type AND a.ctid > b.ctid;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_reminders_booking_type ON reminders_log(booking_id, reminder_type);
+
+-- A student can only be on a room's waitlist once. Position is derived from
+-- created_at at read time (see routes/waitlist.js) instead of a stored
+-- counter, so it stays correct when people ahead leave.
+DELETE FROM waitlist_entries a USING waitlist_entries b
+  WHERE a.room_id = b.room_id AND a.student_id = b.student_id AND a.ctid > b.ctid;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_waitlist_room_student ON waitlist_entries(room_id, student_id);
+
+-- Password reset: only a SHA-256 hash of the token is stored.
+CREATE TABLE IF NOT EXISTS password_resets (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Platform admins live in their OWN table with their own login (see
+-- routes/admin.js): a student/manager account can never become an admin, and
+-- an admin token is rejected by every student/manager route.
+CREATE TABLE IF NOT EXISTS admins (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  email TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL DEFAULT 'Admin',
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_login_at TIMESTAMPTZ
+);
+
+-- An admin marks a "needs_review" payment as handled (e.g. refunded manually).
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS resolution_note TEXT;
+
+-- Roommate profile (all optional). Tags only count toward the roommate filter
+-- when share_with_roommates is true; nothing here is ever shown with a name.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS interests TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sports TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS lifestyle TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS religion TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS share_with_roommates BOOLEAN NOT NULL DEFAULT false;

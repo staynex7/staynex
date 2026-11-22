@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    {
+      "source": "/hostels/:id",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": "(?i).*(googlebot|bingbot|duckduckbot|yandex|baiduspider|applebot|facebookexternalhit|facebot|whatsapp|twitterbot|slackbot|telegrambot|linkedinbot|discordbot).*"
+        }
+      ],
+      "destination": "/api/hostel-meta?id=:id"
+    },
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ]
+}

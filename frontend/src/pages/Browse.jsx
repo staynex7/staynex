@@ -1,0 +1,191 @@
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { Helmet } from "react-helmet-async";
+import { Search, MapPin, ShieldCheck, ChevronRight, SlidersHorizontal } from "lucide-react";
+import { api } from "../api/client.js";
+import FilterPanel from "../components/FilterPanel.jsx";
+import LoadingState from "../components/LoadingState.jsx";
+
+const EMPTY_FILTERS = {
+  minPrice: "", maxPrice: "", roomTypes: [], hostelAmenities: [], roomAmenities: [],
+  rmInterests: [], rmSports: [], rmLifestyle: [], rmReligion: "",
+};
+
+export default function Browse() {
+  const [hostels, setHostels] = useState([]);
+  const [query, setQuery] = useState("");
+  const [gender, setGender] = useState("any");
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const [amenityOptions, setAmenityOptions] = useState({});
+  const [roommateOptions, setRoommateOptions] = useState({});
+
+  useEffect(() => {
+    api.roommateOptions()
+      .then(setRoommateOptions)
+      .catch((err) => console.error("Couldn't load roommate filters:", err.message));
+    api.amenityOptions()
+      .then(setAmenityOptions)
+      .catch((err) => console.error("Couldn't load amenity filters:", err.message));
+  }, []);
+
+  const activeFilterCount =
+    (filters.minPrice ? 1 : 0) +
+    (filters.maxPrice ? 1 : 0) +
+    filters.roomTypes.length +
+    filters.hostelAmenities.length +
+    filters.roomAmenities.length +
+    filters.rmInterests.length +
+    filters.rmSports.length +
+    filters.rmLifestyle.length +
+    (filters.rmReligion ? 1 : 0);
+
+  useEffect(() => {
+    setLoading(true);
+    setLoadError("");
+    api.browseHostels({ search: query, gender, ...filters })
+      .then(setHostels)
+      .catch((err) => setLoadError(err.message || "Couldn't load hostels."))
+      .finally(() => setLoading(false));
+  }, [query, gender, filters]);
+
+  return (
+    <div>
+      <Helmet>
+        <title>StayNex — Student Hostel Booking</title>
+      </Helmet>
+
+      <section className="px-6 sm:px-10 pt-12 pb-10 bg-gradient-to-br from-deep via-ink to-rust text-white">
+        <p className="font-mono text-[11px] uppercase tracking-widest text-sky mb-3">
+          Student housing · 2026/27 academic year
+        </p>
+        <h1 className="font-display text-3xl sm:text-4xl text-white max-w-lg leading-[1.1] mb-4">
+          Reserve your room before you set foot on campus.
+        </h1>
+        <p className="text-white/75 max-w-md mb-6 leading-relaxed">
+          Every bed below is live, not a listing someone forgot to update. Browse, pay a deposit,
+          done — no hostel-to-hostel tours required.
+        </p>
+
+        <div className="flex flex-col sm:flex-row gap-3 max-w-xl">
+          <div className="flex-1 flex items-center gap-2 bg-white border border-ink/10 rounded-full px-4 py-2.5">
+            <Search size={16} className="text-ink/40" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search hostel or area"
+              className="flex-1 outline-none bg-transparent text-sm text-ink placeholder:text-ink/40"
+            />
+          </div>
+          <select
+            value={gender}
+            onChange={(e) => setGender(e.target.value)}
+            className="bg-white border border-ink/10 rounded-full px-4 py-2.5 text-sm text-ink/70 outline-none"
+          >
+            <option value="any">Any gender</option>
+            <option value="male">Male</option>
+            <option value="female">Female</option>
+          </select>
+          <button
+            type="button"
+            onClick={() => setShowFilters(true)}
+            className="flex items-center justify-center gap-1.5 bg-white border border-ink/10 rounded-full px-4 py-2.5 text-sm text-ink/70 hover:border-rust/40 outline-none focus-visible:ring-2 focus-visible:ring-rust relative"
+          >
+            <SlidersHorizontal size={15} /> Filters
+            {activeFilterCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 bg-rust text-paper text-[10px] rounded-full w-5 h-5 flex items-center justify-center">
+                {activeFilterCount}
+              </span>
+            )}
+          </button>
+        </div>
+      </section>
+
+      <section className="px-6 sm:px-10 py-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        {loading && (
+          <div className="col-span-full">
+            <LoadingState message="Loading hostels…" />
+          </div>
+        )}
+        {!loading && loadError && (
+          <div className="col-span-full text-center py-10">
+            <p className="text-sm text-ink/60 mb-4">{loadError}</p>
+            <button
+              onClick={() => setFilters({ ...filters })}
+              className="bg-ink text-paper rounded-full px-5 py-2 text-sm font-medium hover:bg-rust"
+            >
+              Try again
+            </button>
+          </div>
+        )}
+        {!loading && !loadError && hostels.length === 0 && (
+          <p className="text-ink/40 text-sm">No hostels match that search yet.</p>
+        )}
+        {hostels.map((h) => (
+          <Link
+            key={h.id}
+            to={`/hostels/${h.id}`}
+            className="text-left border border-ink/10 rounded-xl bg-white/60 overflow-hidden hover:border-rust/40 hover:-translate-y-0.5 transition-all group block"
+          >
+            <div className="w-full h-36 bg-ink/[0.06] flex items-center justify-center">
+              {h.cover_photo ? (
+                <img src={h.cover_photo} alt={`${h.name} cover photo`} className="w-full h-full object-cover" />
+              ) : (
+                <span className="text-ink/25 text-xs">No photo yet</span>
+              )}
+            </div>
+            <div className="p-5">
+              <div className="flex items-start justify-between mb-3">
+                <div>
+                  <h3 className="font-display text-lg text-ink">{h.name}</h3>
+                  <p className="text-xs text-ink/50 flex items-center gap-1 mt-0.5">
+                    <MapPin size={12} /> {h.area}
+                  </p>
+                  {h.landmark_distances && Object.keys(h.landmark_distances).length > 0 && (
+                    <p className="text-xs text-forest mt-0.5">
+                      {(() => {
+                        const closest = Object.entries(h.landmark_distances).sort((a, b) => a[1].minutes - b[1].minutes)[0];
+                        return `${closest[1].minutes} min walk to ${closest[0]}`;
+                      })()}
+                    </p>
+                  )}
+                </div>
+                {h.verified && <ShieldCheck size={18} className="text-forest shrink-0" />}
+              </div>
+
+              <div className="flex gap-1.5 mb-4">
+                <span className="inline-flex rounded-full px-2.5 py-1 text-[11px] font-mono uppercase bg-ink/[0.06] text-ink/70">
+                  {h.gender_policy}
+                </span>
+                <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-mono uppercase ${
+                  Number(h.open_beds) > 0 ? "bg-forest/10 text-forest" : "bg-gold/15 text-[#7a5c14]"
+                }`}>
+                  {Number(h.open_beds) > 0 ? `${h.open_beds} beds open` : "Full — waitlist"}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between pt-3 border-t border-ink/10">
+                <span className="font-mono text-sm text-ink">
+                  from ₵{Number(h.from_price || 0).toLocaleString()}<span className="text-ink/40">/yr</span>
+                </span>
+                <ChevronRight size={16} className="text-ink/30 group-hover:text-rust group-hover:translate-x-0.5 transition-all" />
+              </div>
+            </div>
+          </Link>
+        ))}
+      </section>
+
+      {showFilters && (
+        <FilterPanel
+          filters={filters}
+          setFilters={setFilters}
+          amenityOptions={amenityOptions}
+          roommateOptions={roommateOptions}
+          onClose={() => setShowFilters(false)}
+        />
+      )}
+    </div>
+  );
+}
